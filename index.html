@@ -16,8 +16,11 @@
            background:var(--ink); color:#fff; }
   button:disabled { opacity:.4; cursor:not-allowed; }
   button.alt { background:#fff; color:var(--ink); border:2px solid #e4e5ea; }
+  select { font:inherit; padding:6px 10px; border-radius:10px; border:2px solid #e4e5ea; background:#fff; color:var(--ink); }
   #joinCode { font:inherit; padding:12px; border-radius:14px; border:2px solid #e4e5ea; width:100%;
           text-transform:uppercase; letter-spacing:4px; text-align:center; }
+  #caption { font:inherit; padding:10px 12px; border-radius:12px; border:2px solid #e4e5ea; width:100%;
+          max-width:320px; text-align:center; }
   .row { display:flex; gap:10px; margin-top:12px; }
   .row > * { flex:1; }
   #call { display:none; width:100%; max-width:900px; }
@@ -78,6 +81,15 @@
     <div class="sect">Layout</div>
     <div class="chips lay" id="layouts"></div>
 
+    <div class="opts" style="margin-top:14px">
+      Pose time between shots
+      <select id="pose">
+        <option value="600">Quick</option>
+        <option value="1500" selected>Normal</option>
+        <option value="3000">Relaxed</option>
+      </select>
+    </div>
+
     <div class="row" style="max-width:520px;margin:16px auto 0">
       <button id="shootBtn" disabled>Take photos</button>
       <button class="alt" id="muteBtn">Mute</button>
@@ -89,6 +101,10 @@
       <canvas id="strip"></canvas>
       <div class="sect">Frame</div>
       <div class="chips" id="chips"></div>
+      <div class="sect">Caption</div>
+      <div style="text-align:center;margin-top:8px">
+        <input id="caption" maxlength="28" placeholder="Leave blank for the date" />
+      </div>
       <div class="opts"><label><input type="checkbox" id="mirror" checked /> Mirror photos</label></div>
       <div class="row" style="max-width:420px;margin:12px auto 0">
         <button id="downloadBtn">Download</button>
@@ -107,6 +123,7 @@
     let mine = [], theirs = [];
     let styleId = "black";
     let layoutId = "strip";
+    let caption = "";
 
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     function setStatus(t) { $("status").textContent = t; }
@@ -179,6 +196,30 @@
       }
     }
 
+    // ---------- pose time + caption (both synced) ----------
+    const poseMs = () => Number($("pose").value);
+
+    function setPose(v, fromMe) {
+      if (running) return;
+      const opt = Array.from($("pose").options).find(o => o.value === String(v));
+      if (!opt) return;
+      $("pose").value = String(v);
+      if (fromMe && conn && conn.open) conn.send({ type: "pose", value: Number(v) });
+    }
+    $("pose").onchange = () => setPose($("pose").value, true);
+
+    let capTimer;
+    function setCaption(text, fromMe) {
+      caption = text;
+      if (!fromMe) $("caption").value = text;
+      if (fromMe && conn && conn.open) conn.send({ type: "caption", text });
+      if ($("results").style.display === "block") {
+        clearTimeout(capTimer);
+        capTimer = setTimeout(showResults, 150);
+      }
+    }
+    $("caption").oninput = () => setCaption($("caption").value, true);
+
     // ---------- camera / call ----------
     function makeCode() {
       const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -223,6 +264,8 @@
         if (isHost) {   // creator's choices become the starting point for both
           conn.send({ type: "layout", id: layoutId });
           conn.send({ type: "style", id: styleId });
+          conn.send({ type: "pose", value: poseMs() });
+          conn.send({ type: "caption", text: caption });
         }
       };
       if (c.open) ready(); else c.on("open", ready);
@@ -232,13 +275,21 @@
 
     function onData(msg) {
       if (msg.type === "start") {
-        if (!running) { if (msg.layout) setLayout(msg.layout, false); runSequence(false); }
+        if (!running) {
+          if (msg.layout) setLayout(msg.layout, false);
+          if (msg.pose) setPose(msg.pose, false);
+          runSequence(false);
+        }
       } else if (msg.type === "shot") {
         theirs[msg.index] = URL.createObjectURL(new Blob([msg.data], { type: "image/jpeg" }));
       } else if (msg.type === "style") {
         setStyle(msg.id, false);
       } else if (msg.type === "layout") {
         setLayout(msg.id, false);
+      } else if (msg.type === "pose") {
+        setPose(msg.value, false);
+      } else if (msg.type === "caption") {
+        setCaption(msg.text || "", false);
       }
     }
 
@@ -277,10 +328,11 @@
       if (running) return;
       running = true;
       $("layouts").classList.add("locked");
+      $("pose").disabled = true;
       mine = []; theirs = [];
       $("results").style.display = "none";
       $("shootBtn").disabled = true;
-      if (initiator) conn.send({ type: "start", layout: layoutId });
+      if (initiator) conn.send({ type: "start", layout: layoutId, pose: poseMs() });
 
       const n = shots();
       for (let i = 0; i < n; i++) {
@@ -290,7 +342,10 @@
         flash();
         mine[i] = URL.createObjectURL(blob);
         conn.send({ type: "shot", index: i, data: await blob.arrayBuffer() });
-        await sleep(600);
+        if (i < n - 1) {
+          $("info").textContent = "Strike a new pose!";
+          await sleep(poseMs());
+        }
       }
 
       $("info").textContent = "Getting their photos...";
@@ -299,6 +354,7 @@
       await showResults();
       running = false;
       $("layouts").classList.remove("locked");
+      $("pose").disabled = false;
       $("shootBtn").disabled = false;
     }
 
@@ -314,6 +370,63 @@
       ctx.fill();
     }
 
+    function cherry(ctx, x, y, s) {   // x = center, y = top
+      ctx.strokeStyle = "#4a7a3a";
+      ctx.lineWidth = s * 0.05;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(x - s * 0.22, y + s * 0.25);
+      ctx.quadraticCurveTo(x - s * 0.15, y + s * 0.02, x + s * 0.05, y);
+      ctx.moveTo(x + s * 0.22, y + s * 0.3);
+      ctx.quadraticCurveTo(x + s * 0.15, y + s * 0.05, x + s * 0.05, y);
+      ctx.stroke();
+      for (const dx of [-0.22, 0.22]) {
+        const cx = x + s * dx, cy = y + s * (dx < 0 ? 0.47 : 0.52), r = s * 0.22;
+        ctx.fillStyle = "#c0262d";
+        ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "rgba(255,255,255,0.65)";
+        ctx.beginPath(); ctx.arc(cx - r * 0.35, cy - r * 0.35, r * 0.2, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+
+    function lemon(ctx, x, y, r) {    // x, y = center
+      ctx.fillStyle = "#f4d03f";
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#fdf3b0";
+      ctx.beginPath(); ctx.arc(x, y, r * 0.84, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "#f4d03f";
+      ctx.lineWidth = r * 0.07;
+      for (let k = 0; k < 8; k++) {
+        const a = k * Math.PI / 4;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + Math.cos(a) * r * 0.84, y + Math.sin(a) * r * 0.84);
+        ctx.stroke();
+      }
+    }
+
+    function bear(ctx, x, y, s) {     // x, y = center of head
+      const dot = (cx, cy, r, color) => { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill(); };
+      for (const dx of [-0.38, 0.38]) {
+        dot(x + s * dx, y - s * 0.36, s * 0.2, "#a98467");
+        dot(x + s * dx, y - s * 0.36, s * 0.11, "#c9a98b");
+      }
+      dot(x, y, s * 0.5, "#b9967a");
+      ctx.fillStyle = "#ead6c3";
+      ctx.beginPath(); ctx.ellipse(x, y + s * 0.14, s * 0.22, s * 0.17, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#5a3d2b";
+      ctx.beginPath(); ctx.ellipse(x, y + s * 0.06, s * 0.07, s * 0.05, 0, 0, Math.PI * 2); ctx.fill();
+      dot(x - s * 0.2, y - s * 0.08, s * 0.04, "#3b2a1f");
+      dot(x + s * 0.2, y - s * 0.08, s * 0.04, "#3b2a1f");
+      ctx.strokeStyle = "#5a3d2b";
+      ctx.lineWidth = s * 0.02;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.arc(x - s * 0.05, y + s * 0.14, s * 0.05, 0, Math.PI);
+      ctx.arc(x + s * 0.05, y + s * 0.14, s * 0.05, 0, Math.PI);
+      ctx.stroke();
+    }
+
     function roundRectPath(ctx, x, y, w, h, r) {
       ctx.beginPath();
       ctx.moveTo(x + r, y);
@@ -324,7 +437,7 @@
       ctx.closePath();
     }
 
-    // plain: true  -> solid color, no photo borders / date pill
+    // plain: true  -> solid color, no photo borders / caption pill
     const STYLES = {
       black: { name: "Classic", plain: true, bg: "#17181c", text: "#ffffff",
         draw(ctx, W, H) { ctx.fillStyle = this.bg; ctx.fillRect(0, 0, W, H); } },
@@ -374,6 +487,38 @@
           ctx.fillStyle = "#e6eefa"; ctx.fillRect(0, 0, W, H);
           ctx.fillStyle = "#a9c4e8";
           for (let x = 0; x < W; x += 28) ctx.fillRect(x, 0, 14, H);
+        } },
+
+      cherry: { name: "Cherry",
+        draw(ctx, W, H) {
+          ctx.fillStyle = "#fff8e6"; ctx.fillRect(0, 0, W, H);
+          ctx.fillStyle = "#a9bfe8";
+          for (let r = 0; r * 80 < H; r++)
+            for (let c = 0; c * 80 < W; c++)
+              if ((r + c) % 2 === 0) ctx.fillRect(c * 80, r * 80, 80, 80);
+          for (let r = 0; r * 160 < H + 160; r++)
+            for (let c = -1; c * 160 < W + 160; c++)
+              cherry(ctx, c * 160 + (r % 2 ? 80 : 0) + 40, r * 160 + 30, 90);
+        } },
+
+      lemon: { name: "Lemon",
+        draw(ctx, W, H) {
+          ctx.fillStyle = "#e6eefa"; ctx.fillRect(0, 0, W, H);
+          ctx.fillStyle = "#a9c4e8";
+          for (let x = 0; x < W; x += 28) ctx.fillRect(x, 0, 14, H);
+          for (let r = 0; r * 130 < H + 130; r++)
+            for (let c = -1; c * 150 < W + 150; c++)
+              lemon(ctx, c * 150 + (r % 2 ? 75 : 0) + 40, r * 130 + 40, 38);
+        } },
+
+      teddy: { name: "Teddy",
+        draw(ctx, W, H) {
+          ctx.fillStyle = "#fbf1ee"; ctx.fillRect(0, 0, W, H);
+          ctx.fillStyle = "#f6e6e0";
+          for (let y = 0; y < H; y += 100) ctx.fillRect(0, y, W, 50);
+          for (let r = 0; r * 150 < H + 150; r++)
+            for (let c = -1; c * 170 < W + 170; c++)
+              bear(ctx, c * 170 + (r % 2 ? 85 : 0) + 50, r * 150 + 60, 90);
         } },
     };
 
@@ -469,21 +614,28 @@
         ctx.fillRect(x + half - 2, y, 4, l.cellH);
       }
 
+      // caption (falls back to the date), shrinks to fit if it's long
       const date = new Date().toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-      ctx.font = `600 ${l.font}px system-ui, sans-serif`;
+      const text = caption.trim() || date;
+      let fs = l.font;
+      ctx.font = `600 ${fs}px system-ui, sans-serif`;
+      while (ctx.measureText(text).width > W - 160 && fs > 16) {
+        fs -= 2;
+        ctx.font = `600 ${fs}px system-ui, sans-serif`;
+      }
       ctx.textAlign = "center";
-      const baseY = H - l.footer / 2 + l.font / 3;
+      const baseY = H - l.footer / 2 + fs / 3;
       if (st.plain) {
         ctx.fillStyle = st.text;
-        ctx.fillText(date, W / 2, baseY);
+        ctx.fillText(text, W / 2, baseY);
       } else {
-        const tw = ctx.measureText(date).width;
-        const ph = l.font + 22;
+        const tw = ctx.measureText(text).width;
+        const ph = fs + 22;
         ctx.fillStyle = "#ffffff";
-        roundRectPath(ctx, W / 2 - tw / 2 - 30, baseY - l.font + 2 - 11, tw + 60, ph, ph / 2);
+        roundRectPath(ctx, W / 2 - tw / 2 - 30, baseY - fs + 2 - 11, tw + 60, ph, ph / 2);
         ctx.fill();
         ctx.fillStyle = "#17181c";
-        ctx.fillText(date, W / 2, baseY);
+        ctx.fillText(text, W / 2, baseY);
       }
 
       $("results").style.display = "block";
