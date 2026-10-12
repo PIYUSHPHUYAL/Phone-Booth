@@ -14,19 +14,30 @@
   .card { background:#fff; border:2px solid #e4e5ea; border-radius:20px; padding:20px; width:100%; max-width:420px; }
   button { font:inherit; font-weight:600; border:0; border-radius:14px; padding:12px 18px; cursor:pointer;
            background:var(--ink); color:#fff; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
   button.alt { background:#fff; color:var(--ink); border:2px solid #e4e5ea; }
   input { font:inherit; padding:12px; border-radius:14px; border:2px solid #e4e5ea; width:100%;
           text-transform:uppercase; letter-spacing:4px; text-align:center; }
   .row { display:flex; gap:10px; margin-top:12px; }
   .row > * { flex:1; }
   #call { display:none; width:100%; max-width:900px; }
+  .stage { position:relative; }
   .videos { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
   video { width:100%; background:#000; border-radius:16px; aspect-ratio:4/3; object-fit:cover; }
-  #localVideo { transform: scaleX(-1); } /* mirror yourself, like a mirror */
+  #localVideo { transform: scaleX(-1); }
   .label { font-size:13px; color:#666; margin:6px 0 0 4px; }
   #status { margin-top:14px; font-size:14px; color:#666; text-align:center; }
   .code { font-size:32px; letter-spacing:8px; font-weight:800; text-align:center; margin:8px 0; }
-  @media (max-width:600px){ .videos { grid-template-columns:1fr; } }
+  #count { position:absolute; inset:0; display:none; align-items:center; justify-content:center;
+           font-size:120px; font-weight:800; color:#fff; text-shadow:0 4px 24px rgba(0,0,0,.5); pointer-events:none; }
+  #flash { position:absolute; inset:0; background:#fff; opacity:0; pointer-events:none; transition:opacity .35s; border-radius:16px; }
+  #flash.on { opacity:.9; transition:none; }
+  #info { text-align:center; font-size:14px; color:#666; margin-top:10px; min-height:20px; }
+  #results { display:none; margin-top:24px; }
+  .pair { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:8px; }
+  .pair img { width:100%; border-radius:10px; aspect-ratio:4/3; object-fit:cover; }
+  .pair img.me { transform: scaleX(-1); }
+  @media (max-width:600px){ .videos { grid-template-columns:1fr; } #count{font-size:90px;} }
 </style>
 </head>
 <body>
@@ -44,27 +55,44 @@
 
   <div id="call">
     <div class="code" id="roomCode"></div>
-    <div class="videos">
-      <div><video id="localVideo" autoplay muted playsinline></video><div class="label">You</div></div>
-      <div><video id="remoteVideo" autoplay playsinline></video><div class="label" id="remoteLabel">Waiting...</div></div>
+    <div class="stage">
+      <div class="videos">
+        <div><video id="localVideo" autoplay muted playsinline></video><div class="label">You</div></div>
+        <div><video id="remoteVideo" autoplay playsinline></video><div class="label" id="remoteLabel">Waiting...</div></div>
+      </div>
+      <div id="flash"></div>
+      <div id="count"></div>
     </div>
-    <div class="row" style="max-width:420px;margin:16px auto 0">
+    <div id="info"></div>
+    <div class="row" style="max-width:520px;margin:16px auto 0">
+      <button id="shootBtn" disabled>Take photos</button>
       <button class="alt" id="muteBtn">Mute</button>
       <button class="alt" id="camBtn">Camera off</button>
-      <button id="leaveBtn">Leave</button>
+      <button class="alt" id="leaveBtn">Leave</button>
+    </div>
+
+    <div id="results">
+      <div id="pairs"></div>
+      <div class="row" style="max-width:300px;margin:12px auto 0">
+        <button id="retakeBtn">Retake</button>
+      </div>
     </div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script>
-    const PREFIX = "booth-pick-something-unique-"; // change this to your own random string
+    const PREFIX = "booth-pick-something-unique-"; // keep the same one you used in Phase 1
+    const SHOTS = 4;
     const $ = (id) => document.getElementById(id);
-    let peer, localStream, currentCall;
+    let peer, localStream, currentCall, conn;
+    let running = false;
+    let mine = [], theirs = [];
 
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     function setStatus(t) { $("status").textContent = t; }
 
     function makeCode() {
-      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no confusing 0/O/1/I
+      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
       return Array.from({length:5}, () => chars[Math.floor(Math.random()*chars.length)]).join("");
     }
 
@@ -97,20 +125,108 @@
       call.on("close", () => { $("remoteLabel").textContent = "Disconnected"; });
     }
 
-    // Person 1: creates the room and waits
+    // ---------- data channel (messages + photos) ----------
+    function setupConn(c) {
+      conn = c;
+      const ready = () => { $("shootBtn").disabled = false; $("info").textContent = "Connected. Ready when you are."; };
+      if (c.open) ready(); else c.on("open", ready);
+      c.on("data", onData);
+      c.on("close", () => { $("shootBtn").disabled = true; $("info").textContent = "Connection lost."; });
+    }
+
+    function onData(msg) {
+      if (msg.type === "start") {
+        if (!running) runSequence(false);
+      } else if (msg.type === "shot") {
+        theirs[msg.index] = URL.createObjectURL(new Blob([msg.data], { type: "image/jpeg" }));
+      }
+    }
+
+    // ---------- capture ----------
+    function captureLocal() {
+      const v = $("localVideo");
+      const scale = Math.min(1, 960 / v.videoWidth);
+      const c = document.createElement("canvas");
+      c.width = Math.round(v.videoWidth * scale);
+      c.height = Math.round(v.videoHeight * scale);
+      c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+      return new Promise(res => c.toBlob(res, "image/jpeg", 0.9));
+    }
+
+    async function countdown() {
+      const el = $("count");
+      el.style.display = "flex";
+      for (let n = 3; n >= 1; n--) { el.textContent = n; await sleep(1000); }
+      el.style.display = "none";
+    }
+
+    async function flash() {
+      const f = $("flash");
+      f.classList.add("on");
+      await sleep(60);
+      f.classList.remove("on");
+    }
+
+    async function waitFor(cond, timeout = 15000) {
+      const t0 = Date.now();
+      while (!cond() && Date.now() - t0 < timeout) await sleep(100);
+      return cond();
+    }
+
+    async function runSequence(initiator) {
+      if (running) return;
+      running = true;
+      mine = []; theirs = [];
+      $("results").style.display = "none";
+      $("shootBtn").disabled = true;
+      if (initiator) conn.send({ type: "start" });
+
+      for (let i = 0; i < SHOTS; i++) {
+        $("info").textContent = `Photo ${i + 1} of ${SHOTS}`;
+        await countdown();
+        const blob = await captureLocal();
+        flash();
+        mine[i] = URL.createObjectURL(blob);
+        conn.send({ type: "shot", index: i, data: await blob.arrayBuffer() });
+        await sleep(600);
+      }
+
+      $("info").textContent = "Getting their photos...";
+      const ok = await waitFor(() => theirs.filter(Boolean).length === SHOTS);
+      $("info").textContent = ok ? "Done!" : "Some of their photos didn't arrive. Try again.";
+      showResults();
+      running = false;
+      $("shootBtn").disabled = false;
+    }
+
+    function showResults() {
+      const box = $("pairs");
+      box.innerHTML = "";
+      for (let i = 0; i < SHOTS; i++) {
+        const row = document.createElement("div");
+        row.className = "pair";
+        row.innerHTML = `<img class="me" src="${mine[i]}"><img src="${theirs[i] || ""}">`;
+        box.appendChild(row);
+      }
+      $("results").style.display = "block";
+    }
+
+    $("shootBtn").onclick = () => runSequence(true);
+    $("retakeBtn").onclick = () => runSequence(true);
+
+    // ---------- room setup ----------
     $("createBtn").onclick = async () => {
       if (!(await getCamera())) return;
       const code = makeCode();
       peer = new Peer(PREFIX + code);
       peer.on("open", () => showCall(code));
       peer.on("call", (call) => { call.answer(localStream); attachCall(call); });
+      peer.on("connection", setupConn);
       peer.on("error", (e) => {
-        if (e.type === "unavailable-id") setStatus("Code clash, press Start again.");
-        else setStatus("Error: " + e.type);
+        setStatus(e.type === "unavailable-id" ? "Code clash, press Start again." : "Error: " + e.type);
       });
     };
 
-    // Person 2: joins with the code
     $("joinBtn").onclick = async () => {
       const code = $("joinCode").value.trim().toUpperCase();
       if (code.length !== 5) return setStatus("Enter the 5-letter code.");
@@ -119,6 +235,7 @@
       peer.on("open", () => {
         showCall(code);
         attachCall(peer.call(PREFIX + code, localStream));
+        setupConn(peer.connect(PREFIX + code, { reliable: true }));
       });
       peer.on("error", (e) => {
         setStatus(e.type === "peer-unavailable" ? "Room not found." : "Error: " + e.type);
