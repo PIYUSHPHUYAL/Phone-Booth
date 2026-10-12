@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Booth</title>
+<style>
+  :root { --bg:#f8f9fb; --ink:#17181c; --pink:#ee82a3; --blue:#6f9cf0; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--ink);
+         display:flex; flex-direction:column; align-items:center; padding:24px 16px; min-height:100vh; }
+  h1 { margin:0 0 4px; }
+  p.sub { margin:0 0 24px; color:#666; }
+  .card { background:#fff; border:2px solid #e4e5ea; border-radius:20px; padding:20px; width:100%; max-width:420px; }
+  button { font:inherit; font-weight:600; border:0; border-radius:14px; padding:12px 18px; cursor:pointer;
+           background:var(--ink); color:#fff; }
+  button.alt { background:#fff; color:var(--ink); border:2px solid #e4e5ea; }
+  input { font:inherit; padding:12px; border-radius:14px; border:2px solid #e4e5ea; width:100%;
+          text-transform:uppercase; letter-spacing:4px; text-align:center; }
+  .row { display:flex; gap:10px; margin-top:12px; }
+  .row > * { flex:1; }
+  #call { display:none; width:100%; max-width:900px; }
+  .videos { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  video { width:100%; background:#000; border-radius:16px; aspect-ratio:4/3; object-fit:cover; }
+  #localVideo { transform: scaleX(-1); } /* mirror yourself, like a mirror */
+  .label { font-size:13px; color:#666; margin:6px 0 0 4px; }
+  #status { margin-top:14px; font-size:14px; color:#666; text-align:center; }
+  .code { font-size:32px; letter-spacing:8px; font-weight:800; text-align:center; margin:8px 0; }
+  @media (max-width:600px){ .videos { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+  <h1>Booth</h1>
+  <p class="sub">A photobooth for two.</p>
+
+  <div class="card" id="lobby">
+    <button id="createBtn" style="width:100%">Start a room</button>
+    <div class="row">
+      <input id="joinCode" maxlength="5" placeholder="CODE" />
+      <button class="alt" id="joinBtn">Join</button>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div id="call">
+    <div class="code" id="roomCode"></div>
+    <div class="videos">
+      <div><video id="localVideo" autoplay muted playsinline></video><div class="label">You</div></div>
+      <div><video id="remoteVideo" autoplay playsinline></video><div class="label" id="remoteLabel">Waiting...</div></div>
+    </div>
+    <div class="row" style="max-width:420px;margin:16px auto 0">
+      <button class="alt" id="muteBtn">Mute</button>
+      <button class="alt" id="camBtn">Camera off</button>
+      <button id="leaveBtn">Leave</button>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script>
+    const PREFIX = "booth-pick-something-unique-"; // change this to your own random string
+    const $ = (id) => document.getElementById(id);
+    let peer, localStream, currentCall;
+
+    function setStatus(t) { $("status").textContent = t; }
+
+    function makeCode() {
+      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no confusing 0/O/1/I
+      return Array.from({length:5}, () => chars[Math.floor(Math.random()*chars.length)]).join("");
+    }
+
+    async function getCamera() {
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({
+          video: { width:{ideal:1280}, height:{ideal:960}, facingMode:"user" },
+          audio: true
+        });
+        $("localVideo").srcObject = localStream;
+        return true;
+      } catch (e) {
+        setStatus("Camera/mic blocked. Allow access and try again.");
+        return false;
+      }
+    }
+
+    function showCall(code) {
+      $("lobby").style.display = "none";
+      $("call").style.display = "block";
+      $("roomCode").textContent = code;
+    }
+
+    function attachCall(call) {
+      currentCall = call;
+      call.on("stream", (remote) => {
+        $("remoteVideo").srcObject = remote;
+        $("remoteLabel").textContent = "Them";
+      });
+      call.on("close", () => { $("remoteLabel").textContent = "Disconnected"; });
+    }
+
+    // Person 1: creates the room and waits
+    $("createBtn").onclick = async () => {
+      if (!(await getCamera())) return;
+      const code = makeCode();
+      peer = new Peer(PREFIX + code);
+      peer.on("open", () => showCall(code));
+      peer.on("call", (call) => { call.answer(localStream); attachCall(call); });
+      peer.on("error", (e) => {
+        if (e.type === "unavailable-id") setStatus("Code clash, press Start again.");
+        else setStatus("Error: " + e.type);
+      });
+    };
+
+    // Person 2: joins with the code
+    $("joinBtn").onclick = async () => {
+      const code = $("joinCode").value.trim().toUpperCase();
+      if (code.length !== 5) return setStatus("Enter the 5-letter code.");
+      if (!(await getCamera())) return;
+      peer = new Peer();
+      peer.on("open", () => {
+        showCall(code);
+        attachCall(peer.call(PREFIX + code, localStream));
+      });
+      peer.on("error", (e) => {
+        setStatus(e.type === "peer-unavailable" ? "Room not found." : "Error: " + e.type);
+      });
+    };
+
+    $("muteBtn").onclick = () => {
+      const t = localStream.getAudioTracks()[0];
+      t.enabled = !t.enabled;
+      $("muteBtn").textContent = t.enabled ? "Mute" : "Unmute";
+    };
+    $("camBtn").onclick = () => {
+      const t = localStream.getVideoTracks()[0];
+      t.enabled = !t.enabled;
+      $("camBtn").textContent = t.enabled ? "Camera off" : "Camera on";
+    };
+    $("leaveBtn").onclick = () => {
+      if (currentCall) currentCall.close();
+      if (peer) peer.destroy();
+      if (localStream) localStream.getTracks().forEach(t => t.stop());
+      location.reload();
+    };
+  </script>
+</body>
+</html>
