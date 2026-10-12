@@ -16,7 +16,7 @@
            background:var(--ink); color:#fff; }
   button:disabled { opacity:.4; cursor:not-allowed; }
   button.alt { background:#fff; color:var(--ink); border:2px solid #e4e5ea; }
-  input[type="text"], #joinCode { font:inherit; padding:12px; border-radius:14px; border:2px solid #e4e5ea; width:100%;
+  #joinCode { font:inherit; padding:12px; border-radius:14px; border:2px solid #e4e5ea; width:100%;
           text-transform:uppercase; letter-spacing:4px; text-align:center; }
   .row { display:flex; gap:10px; margin-top:12px; }
   .row > * { flex:1; }
@@ -37,6 +37,13 @@
   #strip { width:100%; max-width:320px; display:block; margin:0 auto; border-radius:6px;
            box-shadow:0 8px 30px rgba(0,0,0,.15); }
   .opts { text-align:center; margin-top:14px; font-size:14px; color:#666; }
+
+  .chips { display:flex; flex-wrap:wrap; gap:10px; justify-content:center; max-width:520px; margin:18px auto 0; }
+  .chip { background:#fff; border:2px solid #e4e5ea; border-radius:14px; padding:6px; cursor:pointer;
+          text-align:center; font-size:12px; font-weight:600; color:var(--ink); user-select:none; }
+  .chip canvas { width:56px; height:84px; display:block; border-radius:8px; margin-bottom:4px; }
+  .chip.active { border-color:var(--pink); }
+
   @media (max-width:600px){ .videos { grid-template-columns:1fr; } #count{font-size:90px;} }
 </style>
 </head>
@@ -73,6 +80,7 @@
 
     <div id="results">
       <canvas id="strip"></canvas>
+      <div class="chips" id="chips"></div>
       <div class="opts"><label><input type="checkbox" id="mirror" checked /> Mirror photos</label></div>
       <div class="row" style="max-width:420px;margin:12px auto 0">
         <button id="downloadBtn">Download</button>
@@ -90,6 +98,7 @@
     let running = false;
     let isHost = false;
     let mine = [], theirs = [];
+    let styleId = "black";
 
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     function setStatus(t) { $("status").textContent = t; }
@@ -142,6 +151,8 @@
         if (!running) runSequence(false);
       } else if (msg.type === "shot") {
         theirs[msg.index] = URL.createObjectURL(new Blob([msg.data], { type: "image/jpeg" }));
+      } else if (msg.type === "style") {
+        setStyle(msg.id, false);
       }
     }
 
@@ -202,9 +213,110 @@
       $("shootBtn").disabled = false;
     }
 
-    // ---------- compose the strip ----------
-    const STYLE = { bg: "#17181c", text: "#ffffff" };   // Phase 4 will make this swappable
+    // ---------- frame styles (all drawn in code) ----------
+    function heart(ctx, x, y, s, color) {   // x = center, y = top
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(x, y + s * 0.3);
+      ctx.bezierCurveTo(x, y, x - s * 0.5, y, x - s * 0.5, y + s * 0.3);
+      ctx.bezierCurveTo(x - s * 0.5, y + s * 0.65, x, y + s * 0.8, x, y + s);
+      ctx.bezierCurveTo(x, y + s * 0.8, x + s * 0.5, y + s * 0.65, x + s * 0.5, y + s * 0.3);
+      ctx.bezierCurveTo(x + s * 0.5, y, x, y, x, y + s * 0.3);
+      ctx.fill();
+    }
 
+    function roundRectPath(ctx, x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    }
+
+    // plain: true  -> solid color, no photo borders / date pill
+    const STYLES = {
+      black: { name: "Classic", plain: true, bg: "#17181c", text: "#ffffff",
+        draw(ctx, W, H) { ctx.fillStyle = this.bg; ctx.fillRect(0, 0, W, H); } },
+
+      cream: { name: "Cream", plain: true, bg: "#fbf3e4", text: "#17181c",
+        draw(ctx, W, H) { ctx.fillStyle = this.bg; ctx.fillRect(0, 0, W, H); } },
+
+      hearts: { name: "Hearts",
+        draw(ctx, W, H) {
+          ctx.fillStyle = "#fdeedd"; ctx.fillRect(0, 0, W, H);
+          for (let r = 0; r * 100 < H + 100; r++)
+            for (let c = -1; c * 110 < W + 110; c++)
+              heart(ctx, c * 110 + (r % 2 ? 55 : 0), r * 100, 46, "#b8362e");
+        } },
+
+      gingham: { name: "Gingham",
+        draw(ctx, W, H) {
+          ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, W, H);
+          ctx.fillStyle = "rgba(122,160,90,0.5)";
+          for (let y = 0; y < H; y += 120) ctx.fillRect(0, y, W, 60);
+          for (let x = 0; x < W; x += 120) ctx.fillRect(x, 0, 60, H);
+        } },
+
+      dots: { name: "Dots",
+        draw(ctx, W, H) {
+          ctx.fillStyle = "#fdf4d6"; ctx.fillRect(0, 0, W, H);
+          ctx.fillStyle = "#f0a0b0";
+          for (let r = 0; r * 44 < H + 44; r++)
+            for (let c = 0; c * 44 < W + 44; c++) {
+              ctx.beginPath();
+              ctx.arc(c * 44 + (r % 2 ? 22 : 0), r * 44, 5, 0, Math.PI * 2);
+              ctx.fill();
+            }
+        } },
+
+      checker: { name: "Checker",
+        draw(ctx, W, H) {
+          ctx.fillStyle = "#fff8e6"; ctx.fillRect(0, 0, W, H);
+          ctx.fillStyle = "#a9bfe8";
+          for (let r = 0; r * 80 < H; r++)
+            for (let c = 0; c * 80 < W; c++)
+              if ((r + c) % 2 === 0) ctx.fillRect(c * 80, r * 80, 80, 80);
+        } },
+
+      stripes: { name: "Stripes",
+        draw(ctx, W, H) {
+          ctx.fillStyle = "#e6eefa"; ctx.fillRect(0, 0, W, H);
+          ctx.fillStyle = "#a9c4e8";
+          for (let x = 0; x < W; x += 28) ctx.fillRect(x, 0, 14, H);
+        } },
+    };
+
+    function renderChips() {
+      const box = $("chips");
+      box.innerHTML = "";
+      for (const [id, st] of Object.entries(STYLES)) {
+        const chip = document.createElement("div");
+        chip.className = "chip" + (id === styleId ? " active" : "");
+        chip.dataset.id = id;
+        const cv = document.createElement("canvas");
+        cv.width = 300; cv.height = 450;
+        const cx = cv.getContext("2d");
+        cx.scale(0.375, 0.375);          // so the pattern looks like it does on the real strip
+        st.draw(cx, 800, 1200);
+        const label = document.createElement("div");
+        label.textContent = st.name;
+        chip.append(cv, label);
+        chip.onclick = () => setStyle(id, true);
+        box.appendChild(chip);
+      }
+    }
+
+    function setStyle(id, fromMe) {
+      if (!STYLES[id]) return;
+      styleId = id;
+      document.querySelectorAll(".chip").forEach(c => c.classList.toggle("active", c.dataset.id === id));
+      if (fromMe && conn && conn.open) conn.send({ type: "style", id });
+      if ($("results").style.display === "block") showResults();
+    }
+
+    // ---------- compose the strip ----------
     function loadImg(src) {
       return new Promise((res) => {
         if (!src) return res(null);
@@ -240,6 +352,7 @@
       const L = await Promise.all(Array.from({ length: SHOTS }, (_, i) => loadImg(leftSrc[i])));
       const R = await Promise.all(Array.from({ length: SHOTS }, (_, i) => loadImg(rightSrc[i])));
 
+      const st = STYLES[styleId];
       const PAD = 40, GAP = 24, CELL_W = 720, CELL_H = 540, FOOTER = 110;
       const W = PAD * 2 + CELL_W;
       const H = PAD + SHOTS * CELL_H + (SHOTS - 1) * GAP + FOOTER;
@@ -248,23 +361,37 @@
       canvas.width = W; canvas.height = H;
       const ctx = canvas.getContext("2d");
 
-      ctx.fillStyle = STYLE.bg;
-      ctx.fillRect(0, 0, W, H);
+      st.draw(ctx, W, H);
 
+      const dividerColor = st.plain ? st.bg : "#ffffff";
       for (let i = 0; i < SHOTS; i++) {
         const y = PAD + i * (CELL_H + GAP);
         const half = CELL_W / 2;
+        if (!st.plain) {                          // white border around each photo on patterns
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(PAD - 10, y - 10, CELL_W + 20, CELL_H + 20);
+        }
         drawCover(ctx, L[i], PAD, y, half, CELL_H, mirror);
         drawCover(ctx, R[i], PAD + half, y, half, CELL_H, mirror);
-        ctx.fillStyle = STYLE.bg;
-        ctx.fillRect(PAD + half - 2, y, 4, CELL_H);   // thin divider between the two of you
+        ctx.fillStyle = dividerColor;
+        ctx.fillRect(PAD + half - 2, y, 4, CELL_H);
       }
 
-      ctx.fillStyle = STYLE.text;
+      const date = new Date().toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
       ctx.font = "600 34px system-ui, sans-serif";
       ctx.textAlign = "center";
-      const date = new Date().toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-      ctx.fillText(date, W / 2, H - 48);
+      const baseY = H - 48;
+      if (st.plain) {
+        ctx.fillStyle = st.text;
+        ctx.fillText(date, W / 2, baseY);
+      } else {
+        const tw = ctx.measureText(date).width;
+        ctx.fillStyle = "#ffffff";
+        roundRectPath(ctx, W / 2 - tw / 2 - 30, baseY - 40, tw + 60, 56, 28);
+        ctx.fill();
+        ctx.fillStyle = "#17181c";
+        ctx.fillText(date, W / 2, baseY);
+      }
 
       $("results").style.display = "block";
     }
@@ -275,7 +402,7 @@
       $("strip").toBlob((blob) => {
         const a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
-        a.download = "booth-strip.png";
+        a.download = `booth-${styleId}.png`;
         a.click();
         setTimeout(() => URL.revokeObjectURL(a.href), 1000);
       }, "image/png");
@@ -283,6 +410,8 @@
 
     $("shootBtn").onclick = () => runSequence(true);
     $("retakeBtn").onclick = () => runSequence(true);
+
+    renderChips();
 
     // ---------- room setup ----------
     $("createBtn").onclick = async () => {
