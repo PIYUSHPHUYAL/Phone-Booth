@@ -37,12 +37,15 @@
   #strip { width:100%; max-width:320px; display:block; margin:0 auto; border-radius:6px;
            box-shadow:0 8px 30px rgba(0,0,0,.15); }
   .opts { text-align:center; margin-top:14px; font-size:14px; color:#666; }
+  .sect { text-align:center; font-size:13px; font-weight:600; color:#888; margin-top:18px; }
 
-  .chips { display:flex; flex-wrap:wrap; gap:10px; justify-content:center; max-width:520px; margin:18px auto 0; }
+  .chips { display:flex; flex-wrap:wrap; gap:10px; justify-content:center; max-width:520px; margin:8px auto 0; }
   .chip { background:#fff; border:2px solid #e4e5ea; border-radius:14px; padding:6px; cursor:pointer;
           text-align:center; font-size:12px; font-weight:600; color:var(--ink); user-select:none; }
   .chip canvas { width:56px; height:84px; display:block; border-radius:8px; margin-bottom:4px; }
+  .chips.lay .chip canvas { height:56px; margin:0 auto 4px; background:#f1f2f5; }
   .chip.active { border-color:var(--pink); }
+  .chips.locked { opacity:.45; pointer-events:none; }
 
   @media (max-width:600px){ .videos { grid-template-columns:1fr; } #count{font-size:90px;} }
 </style>
@@ -71,6 +74,10 @@
       <div id="count"></div>
     </div>
     <div id="info"></div>
+
+    <div class="sect">Layout</div>
+    <div class="chips lay" id="layouts"></div>
+
     <div class="row" style="max-width:520px;margin:16px auto 0">
       <button id="shootBtn" disabled>Take photos</button>
       <button class="alt" id="muteBtn">Mute</button>
@@ -80,6 +87,7 @@
 
     <div id="results">
       <canvas id="strip"></canvas>
+      <div class="sect">Frame</div>
       <div class="chips" id="chips"></div>
       <div class="opts"><label><input type="checkbox" id="mirror" checked /> Mirror photos</label></div>
       <div class="row" style="max-width:420px;margin:12px auto 0">
@@ -92,17 +100,86 @@
   <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script>
     const PREFIX = "booth-pick-something-unique-"; // keep the same one you used before
-    const SHOTS = 4;
     const $ = (id) => document.getElementById(id);
     let peer, localStream, currentCall, conn;
     let running = false;
     let isHost = false;
     let mine = [], theirs = [];
     let styleId = "black";
+    let layoutId = "strip";
 
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     function setStatus(t) { $("status").textContent = t; }
 
+    // ---------- layouts ----------
+    // shots: photos needed | cols: grid columns | cell: size of each (two-person) cell
+    const LAYOUTS = {
+      strip:    { name: "4 cut",    sub: "classic strip", shots: 4, cols: 1, cellW: 720, cellH: 540, pad: 40, gap: 24, footer: 110, font: 34 },
+      grid:     { name: "2 × 2",    sub: "four, on a card", shots: 4, cols: 2, cellW: 560, cellH: 420, pad: 40, gap: 24, footer: 110, font: 34 },
+      two:      { name: "2 cut",    sub: "two big photos", shots: 2, cols: 1, cellW: 800, cellH: 600, pad: 40, gap: 24, footer: 110, font: 34 },
+      polaroid: { name: "Polaroid", sub: "one shot", shots: 1, cols: 1, cellW: 800, cellH: 640, pad: 50, gap: 0,  footer: 220, font: 48 },
+    };
+    const shots = () => LAYOUTS[layoutId].shots;
+
+    function layoutSize(l) {
+      const rows = Math.ceil(l.shots / l.cols);
+      return {
+        rows,
+        W: l.pad * 2 + l.cols * l.cellW + (l.cols - 1) * l.gap,
+        H: l.pad + rows * l.cellH + (rows - 1) * l.gap + l.footer,
+      };
+    }
+    function cellXY(l, i) {
+      return {
+        x: l.pad + (i % l.cols) * (l.cellW + l.gap),
+        y: l.pad + Math.floor(i / l.cols) * (l.cellH + l.gap),
+      };
+    }
+
+    function renderLayoutChips() {
+      const box = $("layouts");
+      box.innerHTML = "";
+      for (const [id, l] of Object.entries(LAYOUTS)) {
+        const chip = document.createElement("div");
+        chip.className = "chip" + (id === layoutId ? " active" : "");
+        chip.dataset.id = id;
+        const cv = document.createElement("canvas");
+        cv.width = 112; cv.height = 112;
+        const cx = cv.getContext("2d");
+        const { W, H } = layoutSize(l);
+        const s = Math.min(100 / W, 100 / H);
+        const ox = (112 - W * s) / 2, oy = (112 - H * s) / 2;
+        cx.fillStyle = "#17181c";
+        cx.fillRect(ox, oy, W * s, H * s);
+        cx.fillStyle = "#ffffff";
+        for (let i = 0; i < l.shots; i++) {
+          const { x, y } = cellXY(l, i);
+          cx.fillRect(ox + x * s, oy + y * s, l.cellW * s, l.cellH * s);
+        }
+        const label = document.createElement("div");
+        label.textContent = l.name;
+        chip.append(cv, label);
+        chip.onclick = () => setLayout(id, true);
+        box.appendChild(chip);
+      }
+    }
+
+    function setLayout(id, fromMe) {
+      if (!LAYOUTS[id] || running) return;
+      layoutId = id;
+      document.querySelectorAll("#layouts .chip").forEach(c => c.classList.toggle("active", c.dataset.id === id));
+      if (fromMe && conn && conn.open) conn.send({ type: "layout", id });
+      if ($("results").style.display === "block") {
+        const have = Math.min(mine.filter(Boolean).length, theirs.filter(Boolean).length);
+        if (have >= shots()) showResults();
+        else {
+          $("results").style.display = "none";
+          $("info").textContent = "New layout needs more photos. Take new ones!";
+        }
+      }
+    }
+
+    // ---------- camera / call ----------
     function makeCode() {
       const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
       return Array.from({length:5}, () => chars[Math.floor(Math.random()*chars.length)]).join("");
@@ -140,7 +217,14 @@
     // ---------- data channel (messages + photos) ----------
     function setupConn(c) {
       conn = c;
-      const ready = () => { $("shootBtn").disabled = false; $("info").textContent = "Connected. Ready when you are."; };
+      const ready = () => {
+        $("shootBtn").disabled = false;
+        $("info").textContent = "Connected. Ready when you are.";
+        if (isHost) {   // creator's choices become the starting point for both
+          conn.send({ type: "layout", id: layoutId });
+          conn.send({ type: "style", id: styleId });
+        }
+      };
       if (c.open) ready(); else c.on("open", ready);
       c.on("data", onData);
       c.on("close", () => { $("shootBtn").disabled = true; $("info").textContent = "Connection lost."; });
@@ -148,11 +232,13 @@
 
     function onData(msg) {
       if (msg.type === "start") {
-        if (!running) runSequence(false);
+        if (!running) { if (msg.layout) setLayout(msg.layout, false); runSequence(false); }
       } else if (msg.type === "shot") {
         theirs[msg.index] = URL.createObjectURL(new Blob([msg.data], { type: "image/jpeg" }));
       } else if (msg.type === "style") {
         setStyle(msg.id, false);
+      } else if (msg.type === "layout") {
+        setLayout(msg.id, false);
       }
     }
 
@@ -190,13 +276,15 @@
     async function runSequence(initiator) {
       if (running) return;
       running = true;
+      $("layouts").classList.add("locked");
       mine = []; theirs = [];
       $("results").style.display = "none";
       $("shootBtn").disabled = true;
-      if (initiator) conn.send({ type: "start" });
+      if (initiator) conn.send({ type: "start", layout: layoutId });
 
-      for (let i = 0; i < SHOTS; i++) {
-        $("info").textContent = `Photo ${i + 1} of ${SHOTS}`;
+      const n = shots();
+      for (let i = 0; i < n; i++) {
+        $("info").textContent = `Photo ${i + 1} of ${n}`;
         await countdown();
         const blob = await captureLocal();
         flash();
@@ -206,10 +294,11 @@
       }
 
       $("info").textContent = "Getting their photos...";
-      const ok = await waitFor(() => theirs.filter(Boolean).length === SHOTS);
+      const ok = await waitFor(() => theirs.filter(Boolean).length >= n);
       $("info").textContent = ok ? "Done!" : "Some of their photos didn't arrive. Try again.";
       await showResults();
       running = false;
+      $("layouts").classList.remove("locked");
       $("shootBtn").disabled = false;
     }
 
@@ -311,12 +400,12 @@
     function setStyle(id, fromMe) {
       if (!STYLES[id]) return;
       styleId = id;
-      document.querySelectorAll(".chip").forEach(c => c.classList.toggle("active", c.dataset.id === id));
+      document.querySelectorAll("#chips .chip").forEach(c => c.classList.toggle("active", c.dataset.id === id));
       if (fromMe && conn && conn.open) conn.send({ type: "style", id });
       if ($("results").style.display === "block") showResults();
     }
 
-    // ---------- compose the strip ----------
+    // ---------- compose the result ----------
     function loadImg(src) {
       return new Promise((res) => {
         if (!src) return res(null);
@@ -347,47 +436,51 @@
 
     async function showResults() {
       const mirror = $("mirror").checked;
+      const n = shots();
       const leftSrc  = isHost ? mine : theirs;   // room creator always on the left
       const rightSrc = isHost ? theirs : mine;
-      const L = await Promise.all(Array.from({ length: SHOTS }, (_, i) => loadImg(leftSrc[i])));
-      const R = await Promise.all(Array.from({ length: SHOTS }, (_, i) => loadImg(rightSrc[i])));
+      const L = await Promise.all(Array.from({ length: n }, (_, i) => loadImg(leftSrc[i])));
+      const R = await Promise.all(Array.from({ length: n }, (_, i) => loadImg(rightSrc[i])));
 
+      // read these AFTER the awaits so quick clicks always render the latest choice
+      const l = LAYOUTS[layoutId];
       const st = STYLES[styleId];
-      const PAD = 40, GAP = 24, CELL_W = 720, CELL_H = 540, FOOTER = 110;
-      const W = PAD * 2 + CELL_W;
-      const H = PAD + SHOTS * CELL_H + (SHOTS - 1) * GAP + FOOTER;
+      const { W, H } = layoutSize(l);
 
       const canvas = $("strip");
       canvas.width = W; canvas.height = H;
+      const ratio = W / H;
+      canvas.style.maxWidth = ratio > 1.1 ? "560px" : ratio > 0.8 ? "420px" : "320px";
       const ctx = canvas.getContext("2d");
 
       st.draw(ctx, W, H);
 
       const dividerColor = st.plain ? st.bg : "#ffffff";
-      for (let i = 0; i < SHOTS; i++) {
-        const y = PAD + i * (CELL_H + GAP);
-        const half = CELL_W / 2;
+      const half = l.cellW / 2;
+      for (let i = 0; i < n; i++) {
+        const { x, y } = cellXY(l, i);
         if (!st.plain) {                          // white border around each photo on patterns
           ctx.fillStyle = "#ffffff";
-          ctx.fillRect(PAD - 10, y - 10, CELL_W + 20, CELL_H + 20);
+          ctx.fillRect(x - 10, y - 10, l.cellW + 20, l.cellH + 20);
         }
-        drawCover(ctx, L[i], PAD, y, half, CELL_H, mirror);
-        drawCover(ctx, R[i], PAD + half, y, half, CELL_H, mirror);
+        drawCover(ctx, L[i], x, y, half, l.cellH, mirror);
+        drawCover(ctx, R[i], x + half, y, half, l.cellH, mirror);
         ctx.fillStyle = dividerColor;
-        ctx.fillRect(PAD + half - 2, y, 4, CELL_H);
+        ctx.fillRect(x + half - 2, y, 4, l.cellH);
       }
 
       const date = new Date().toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-      ctx.font = "600 34px system-ui, sans-serif";
+      ctx.font = `600 ${l.font}px system-ui, sans-serif`;
       ctx.textAlign = "center";
-      const baseY = H - 48;
+      const baseY = H - l.footer / 2 + l.font / 3;
       if (st.plain) {
         ctx.fillStyle = st.text;
         ctx.fillText(date, W / 2, baseY);
       } else {
         const tw = ctx.measureText(date).width;
+        const ph = l.font + 22;
         ctx.fillStyle = "#ffffff";
-        roundRectPath(ctx, W / 2 - tw / 2 - 30, baseY - 40, tw + 60, 56, 28);
+        roundRectPath(ctx, W / 2 - tw / 2 - 30, baseY - l.font + 2 - 11, tw + 60, ph, ph / 2);
         ctx.fill();
         ctx.fillStyle = "#17181c";
         ctx.fillText(date, W / 2, baseY);
@@ -402,7 +495,7 @@
       $("strip").toBlob((blob) => {
         const a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
-        a.download = `booth-${styleId}.png`;
+        a.download = `booth-${layoutId}-${styleId}.png`;
         a.click();
         setTimeout(() => URL.revokeObjectURL(a.href), 1000);
       }, "image/png");
@@ -411,6 +504,7 @@
     $("shootBtn").onclick = () => runSequence(true);
     $("retakeBtn").onclick = () => runSequence(true);
 
+    renderLayoutChips();
     renderChips();
 
     // ---------- room setup ----------
