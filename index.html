@@ -16,7 +16,7 @@
            background:var(--ink); color:#fff; }
   button:disabled { opacity:.4; cursor:not-allowed; }
   button.alt { background:#fff; color:var(--ink); border:2px solid #e4e5ea; }
-  input { font:inherit; padding:12px; border-radius:14px; border:2px solid #e4e5ea; width:100%;
+  input[type="text"], #joinCode { font:inherit; padding:12px; border-radius:14px; border:2px solid #e4e5ea; width:100%;
           text-transform:uppercase; letter-spacing:4px; text-align:center; }
   .row { display:flex; gap:10px; margin-top:12px; }
   .row > * { flex:1; }
@@ -34,9 +34,9 @@
   #flash.on { opacity:.9; transition:none; }
   #info { text-align:center; font-size:14px; color:#666; margin-top:10px; min-height:20px; }
   #results { display:none; margin-top:24px; }
-  .pair { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:8px; }
-  .pair img { width:100%; border-radius:10px; aspect-ratio:4/3; object-fit:cover; }
-  .pair img.me { transform: scaleX(-1); }
+  #strip { width:100%; max-width:320px; display:block; margin:0 auto; border-radius:6px;
+           box-shadow:0 8px 30px rgba(0,0,0,.15); }
+  .opts { text-align:center; margin-top:14px; font-size:14px; color:#666; }
   @media (max-width:600px){ .videos { grid-template-columns:1fr; } #count{font-size:90px;} }
 </style>
 </head>
@@ -72,20 +72,23 @@
     </div>
 
     <div id="results">
-      <div id="pairs"></div>
-      <div class="row" style="max-width:300px;margin:12px auto 0">
-        <button id="retakeBtn">Retake</button>
+      <canvas id="strip"></canvas>
+      <div class="opts"><label><input type="checkbox" id="mirror" checked /> Mirror photos</label></div>
+      <div class="row" style="max-width:420px;margin:12px auto 0">
+        <button id="downloadBtn">Download</button>
+        <button class="alt" id="retakeBtn">Retake</button>
       </div>
     </div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script>
-    const PREFIX = "booth-pick-something-unique-"; // keep the same one you used in Phase 1
+    const PREFIX = "booth-pick-something-unique-"; // keep the same one you used before
     const SHOTS = 4;
     const $ = (id) => document.getElementById(id);
     let peer, localStream, currentCall, conn;
     let running = false;
+    let isHost = false;
     let mine = [], theirs = [];
 
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -194,22 +197,89 @@
       $("info").textContent = "Getting their photos...";
       const ok = await waitFor(() => theirs.filter(Boolean).length === SHOTS);
       $("info").textContent = ok ? "Done!" : "Some of their photos didn't arrive. Try again.";
-      showResults();
+      await showResults();
       running = false;
       $("shootBtn").disabled = false;
     }
 
-    function showResults() {
-      const box = $("pairs");
-      box.innerHTML = "";
-      for (let i = 0; i < SHOTS; i++) {
-        const row = document.createElement("div");
-        row.className = "pair";
-        row.innerHTML = `<img class="me" src="${mine[i]}"><img src="${theirs[i] || ""}">`;
-        box.appendChild(row);
+    // ---------- compose the strip ----------
+    const STYLE = { bg: "#17181c", text: "#ffffff" };   // Phase 4 will make this swappable
+
+    function loadImg(src) {
+      return new Promise((res) => {
+        if (!src) return res(null);
+        const im = new Image();
+        im.onload = () => res(im);
+        im.onerror = () => res(null);
+        im.src = src;
+      });
+    }
+
+    // draw an image into a box, center-cropped to fill it (like CSS object-fit: cover)
+    function drawCover(ctx, img, x, y, w, h, mirror) {
+      if (!img) { ctx.fillStyle = "#333"; ctx.fillRect(x, y, w, h); return; }
+      const scale = Math.max(w / img.width, h / img.height);
+      const sw = w / scale, sh = h / scale;
+      const sx = (img.width - sw) / 2, sy = (img.height - sh) / 2;
+      ctx.save();
+      ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+      if (mirror) {
+        ctx.translate(x + w, y);
+        ctx.scale(-1, 1);
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, w, h);
+      } else {
+        ctx.drawImage(img, sx, sy, sw, sh, x, y, w, h);
       }
+      ctx.restore();
+    }
+
+    async function showResults() {
+      const mirror = $("mirror").checked;
+      const leftSrc  = isHost ? mine : theirs;   // room creator always on the left
+      const rightSrc = isHost ? theirs : mine;
+      const L = await Promise.all(Array.from({ length: SHOTS }, (_, i) => loadImg(leftSrc[i])));
+      const R = await Promise.all(Array.from({ length: SHOTS }, (_, i) => loadImg(rightSrc[i])));
+
+      const PAD = 40, GAP = 24, CELL_W = 720, CELL_H = 540, FOOTER = 110;
+      const W = PAD * 2 + CELL_W;
+      const H = PAD + SHOTS * CELL_H + (SHOTS - 1) * GAP + FOOTER;
+
+      const canvas = $("strip");
+      canvas.width = W; canvas.height = H;
+      const ctx = canvas.getContext("2d");
+
+      ctx.fillStyle = STYLE.bg;
+      ctx.fillRect(0, 0, W, H);
+
+      for (let i = 0; i < SHOTS; i++) {
+        const y = PAD + i * (CELL_H + GAP);
+        const half = CELL_W / 2;
+        drawCover(ctx, L[i], PAD, y, half, CELL_H, mirror);
+        drawCover(ctx, R[i], PAD + half, y, half, CELL_H, mirror);
+        ctx.fillStyle = STYLE.bg;
+        ctx.fillRect(PAD + half - 2, y, 4, CELL_H);   // thin divider between the two of you
+      }
+
+      ctx.fillStyle = STYLE.text;
+      ctx.font = "600 34px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      const date = new Date().toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+      ctx.fillText(date, W / 2, H - 48);
+
       $("results").style.display = "block";
     }
+
+    $("mirror").onchange = showResults;
+
+    $("downloadBtn").onclick = () => {
+      $("strip").toBlob((blob) => {
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "booth-strip.png";
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      }, "image/png");
+    };
 
     $("shootBtn").onclick = () => runSequence(true);
     $("retakeBtn").onclick = () => runSequence(true);
@@ -217,6 +287,7 @@
     // ---------- room setup ----------
     $("createBtn").onclick = async () => {
       if (!(await getCamera())) return;
+      isHost = true;
       const code = makeCode();
       peer = new Peer(PREFIX + code);
       peer.on("open", () => showCall(code));
