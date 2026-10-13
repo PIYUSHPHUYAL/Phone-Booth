@@ -141,6 +141,21 @@
         background:#fff; cursor:pointer; padding:0; transition:transform .12s; }
 .rbtn:active { transform:scale(.85); }
 
+/* "Us" bar */
+.us { max-width:560px; margin:0 auto 18px; text-align:center; }
+.us-clocks { display:flex; align-items:center; justify-content:center; gap:14px; flex-wrap:wrap; }
+.clock { background:#fff; border:2px solid var(--line); border-radius:18px; padding:8px 16px; display:flex; flex-direction:column; min-width:130px; }
+.clock .city { font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+.clock b { font-size:22px; letter-spacing:-.5px; }
+.gap { font-size:12px; color:var(--muted); max-width:130px; }
+.us-row { display:flex; gap:8px; justify-content:center; align-items:center; flex-wrap:wrap; margin-top:10px; }
+.us-chip { background:rgba(255,255,255,.85); border:2px solid var(--line); border-radius:999px; padding:7px 14px; font-size:13px; font-weight:600; }
+.us-edit { display:none; gap:10px; justify-content:center; align-items:flex-end; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--muted); }
+.us-edit label { display:flex; flex-direction:column; gap:4px; text-align:left; }
+.us-edit input { font:inherit; padding:8px 10px; border:2px solid var(--line); border-radius:12px; background:#fff; }
+
+
+
   @media (max-width:560px) { #count { font-size:80px; } }
 </style>
 </head>
@@ -150,6 +165,24 @@
     <div class="logo">booth<span class="dots"><i></i><i></i></span></div>
     <div class="tagline">A photobooth for two</div>
   </header>
+
+  <section class="us" id="usBar">
+  <div class="us-clocks">
+    <div class="clock"><span class="city" id="cityA"></span><b id="timeA"></b></div>
+    <div class="gap" id="gapText"></div>
+    <div class="clock"><span class="city" id="cityB"></span><b id="timeB"></b></div>
+  </div>
+  <div class="us-row">
+    <div class="us-chip">✈️ <span id="meetText"></span></div>
+    <div class="us-chip">💞 <span id="sinceText"></span></div>
+    <button class="btn mini ghost" id="usEdit" title="Edit dates">✎</button>
+  </div>
+  <div class="us-edit" id="usForm">
+    <label>Together since <input type="date" id="sinceInput" /></label>
+    <label>Next time we meet <input type="date" id="meetInput" /></label>
+    <button class="btn mini primary" id="usSave">Save</button>
+  </div>
+</section>
 
   <section class="panel" id="lobby">
     <h2 id="lobbyTitle">Say cheese, together.</h2>
@@ -231,6 +264,7 @@
 
           <div class="label-s">Caption</div>
           <input id="caption" maxlength="28" placeholder="Leave blank for the date" />
+          <button class="btn mini ghost" id="capDays" style="margin-top:8px;display:none"></button>
           <div class="label-s">Flip photos</div>
 <div class="seg" id="flips">
   <button id="flipL" class="on">Left person</button>
@@ -483,6 +517,7 @@
         conn.send({ type: "caption", text: caption });
         conn.send({ type: "flips", l: flipL, r: flipR });
       }
+      sendUs();
     };
     if (c.open) ready(); else c.on("open", ready);
     c.on("data", onData);
@@ -513,6 +548,8 @@
     receiveReaction(msg.i);}
     else if (msg.type === "sticker") {
       applyStickerOp(msg);
+      } else if (msg.type === "us") {
+  if (msg.us && msg.us.ts > us.ts) { us = msg.us; saveUs(); renderUs(); }
     }
   }
 
@@ -521,10 +558,10 @@
 const REACTIONS = [
   { e: "❤️", name: "Love" },
   { e: "😘", name: "Kiss", big: true, msg: "sent you a kiss 😘" },
-  { e: "🤗", name: "Hug",  big: true, msg: "sent you a hug 🤗" },
+  { e: "💋", name: "Kiss",  big: true, msg: "sent you a puppy 💋" },
   { e: "🥰", name: "Adore" },
   { e: "😂", name: "Haha" },
-  { e: "🔥", name: "Hot" },
+  { e: "🥺", name: "Cry" },
 ];
 
 function floatEmoji(e, count, big) {
@@ -577,7 +614,93 @@ REACTIONS.forEach((r, i) => {
   $("reactBar").appendChild(b);
 });
 
+// ---------- "Us" bar: clocks, countdown, days together ----------
+// If either of you ever moves, just change the two lines below.
+const ZONES = [
+  { label: "Kathmandu", tz: "Asia/Kathmandu" },
+  { label: "Seoul",     tz: "Asia/Seoul" },
+];
 
+function tzOffsetMin(tz, date) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).formatToParts(date).map(x => [x.type, x.value]));
+  const asUTC = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second);
+  return Math.round((asUTC - Math.floor(date.getTime() / 1000) * 1000) / 60000);
+}
+
+function updateClocks() {
+  const now = new Date();
+  const fmt = (tz) => new Intl.DateTimeFormat([], { timeZone: tz, hour: "numeric", minute: "2-digit" }).format(now);
+  $("cityA").textContent = ZONES[0].label;  $("timeA").textContent = fmt(ZONES[0].tz);
+  $("cityB").textContent = ZONES[1].label;  $("timeB").textContent = fmt(ZONES[1].tz);
+  const diff = tzOffsetMin(ZONES[1].tz, now) - tzOffsetMin(ZONES[0].tz, now);
+  const h = Math.floor(Math.abs(diff) / 60), m = Math.abs(diff) % 60;
+  $("gapText").textContent = diff === 0
+    ? "Same time"
+    : `${ZONES[1].label} is ${h}h${m ? " " + m + "m" : ""} ${diff > 0 ? "ahead" : "behind"}`;
+}
+setInterval(updateClocks, 10000);
+updateClocks();
+
+let us = { since: "", meet: "", ts: 0 };
+try { const saved = JSON.parse(localStorage.getItem("booth.us") || "null"); if (saved) us = saved; } catch (e) {}
+function saveUs() { try { localStorage.setItem("booth.us", JSON.stringify(us)); } catch (e) {} }
+function sendUs() { if (conn && conn.open) conn.send({ type: "us", us }); }
+
+// whole days from a "YYYY-MM-DD" string up to today (negative if it's in the future)
+function daysSince(str) {
+  const [y, m, d] = str.split("-").map(Number);
+  const from = new Date(y, m - 1, d);
+  const t = new Date();
+  const today = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+  return Math.round((today - from) / 86400000);
+}
+
+function daysTogetherText() {
+  if (!us.since) return "";
+  const n = daysSince(us.since);
+  return n >= 0 ? `${n} days together ♥` : "";
+}
+
+function renderUs() {
+  let meetText = "Set your next meeting";
+  if (us.meet) {
+    const n = -daysSince(us.meet);
+    if (n > 0) meetText = `${n} day${n === 1 ? "" : "s"} until we meet`;
+    else if (n === 0) meetText = "We meet today! 🎉";
+    else meetText = "Plan your next meeting";
+  }
+  $("meetText").textContent = meetText;
+
+  const together = daysTogetherText();
+  $("sinceText").textContent = together ? together.replace(" ♥", "") : "Set your anniversary";
+
+  const btn = $("capDays");
+  btn.style.display = together ? "inline-block" : "none";
+  btn.textContent = `Use "${together}"`;
+}
+
+$("usEdit").onclick = () => {
+  const form = $("usForm");
+  const open = form.style.display === "flex";
+  form.style.display = open ? "none" : "flex";
+  $("sinceInput").value = us.since || "";
+  $("meetInput").value = us.meet || "";
+};
+$("usSave").onclick = () => {
+  us = { since: $("sinceInput").value, meet: $("meetInput").value, ts: Date.now() };
+  saveUs(); renderUs(); sendUs();
+  $("usForm").style.display = "none";
+};
+$("capDays").onclick = () => {
+  const text = daysTogetherText();
+  if (!text) return;
+  $("caption").value = text;
+  setCaption(text, true);
+};
+renderUs();
 
 
   // ---------- capture ----------
