@@ -123,6 +123,24 @@
   .actions { display:flex; gap:10px; margin-top:20px; }
   .actions .btn { flex:1; }
 
+/* reactions */
+#fx { position:absolute; inset:0; overflow:hidden; pointer-events:none; border-radius:20px; z-index:5; }
+.float-emoji { position:absolute; bottom:6%; pointer-events:none; will-change:transform,opacity;
+               animation:floatUp 2.4s ease-out forwards; }
+@keyframes floatUp {
+  0%   { transform:translateY(0) scale(.6); opacity:0; }
+  15%  { opacity:1; }
+  100% { transform:translateY(var(--rise,-300px)) scale(1.4) rotate(var(--rot,0deg)); opacity:0; }
+}
+#toast { position:absolute; left:50%; top:14px; transform:translateX(-50%); background:rgba(0,0,0,.55); color:#fff;
+         padding:8px 16px; border-radius:999px; font-weight:600; font-size:14px; backdrop-filter:blur(6px);
+         opacity:0; transition:opacity .25s; pointer-events:none; z-index:6; white-space:nowrap; }
+#toast.show { opacity:1; }
+.react-bar { display:flex; gap:8px; justify-content:center; flex-wrap:wrap; margin-top:12px; }
+.rbtn { width:46px; height:46px; font-size:22px; border-radius:50%; border:2px solid var(--line);
+        background:#fff; cursor:pointer; padding:0; transition:transform .12s; }
+.rbtn:active { transform:scale(.85); }
+
   @media (max-width:560px) { #count { font-size:80px; } }
 </style>
 </head>
@@ -169,8 +187,11 @@
       </div>
       <div id="flash"></div>
       <div id="count"></div>
+      <div id="fx"></div>
+      <div id="toast"></div>
     </div>
     <div id="info"></div>
+    <div class="react-bar" id="reactBar"></div>
 
     <div class="controls">
       <button class="btn ghost round" id="muteBtn" title="Mute">🎤</button>
@@ -488,10 +509,76 @@
     }
     else if (msg.type === "flips") {
      setFlips(msg.l, msg.r, false);}
+    else if (msg.type === "react") {
+    receiveReaction(msg.i);}
     else if (msg.type === "sticker") {
       applyStickerOp(msg);
     }
   }
+
+
+// ---------- live reactions ----------
+const REACTIONS = [
+  { e: "❤️", name: "Love" },
+  { e: "😘", name: "Kiss", big: true, msg: "sent you a kiss 😘" },
+  { e: "🤗", name: "Hug",  big: true, msg: "sent you a hug 🤗" },
+  { e: "🥰", name: "Adore" },
+  { e: "😂", name: "Haha" },
+  { e: "🔥", name: "Hot" },
+];
+
+function floatEmoji(e, count, big) {
+  const fx = $("fx");
+  if (fx.children.length > 60) return;           // don't let spam pile up
+  for (let i = 0; i < count; i++) {
+    setTimeout(() => {
+      const el = document.createElement("div");
+      el.className = "float-emoji";
+      el.textContent = e;
+      el.style.left = (8 + Math.random() * 84) + "%";
+      el.style.fontSize = (big ? 38 + Math.random() * 26 : 30 + Math.random() * 10) + "px";
+      el.style.setProperty("--rise", `-${fx.clientHeight * 0.85}px`);
+      el.style.setProperty("--rot", (Math.random() * 50 - 25) + "deg");
+      el.style.animationDuration = (2 + Math.random() * 1.2) + "s";
+      fx.appendChild(el);
+      el.addEventListener("animationend", () => el.remove());
+    }, i * (big ? 90 : 0));
+  }
+}
+
+let toastTimer;
+function showToast(text) {
+  const t = $("toast");
+  t.textContent = text;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 2200);
+}
+
+function sendReaction(i) {
+  const r = REACTIONS[i];
+  floatEmoji(r.e, r.big ? 10 : 3, !!r.big);
+  if (conn && conn.open) conn.send({ type: "react", i });
+}
+
+function receiveReaction(i) {
+  const r = REACTIONS[i];
+  if (!r) return;
+  floatEmoji(r.e, r.big ? 10 : 3, !!r.big);
+  if (r.msg) showToast("They " + r.msg);
+}
+
+REACTIONS.forEach((r, i) => {
+  const b = document.createElement("button");
+  b.className = "rbtn";
+  b.textContent = r.e;
+  b.title = r.name;
+  b.onclick = () => sendReaction(i);
+  $("reactBar").appendChild(b);
+});
+
+
+
 
   // ---------- capture ----------
   function captureLocal() {
