@@ -210,7 +210,12 @@
 
           <div class="label-s">Caption</div>
           <input id="caption" maxlength="28" placeholder="Leave blank for the date" />
-          <label class="check"><input type="checkbox" id="mirror" checked /> Mirror photos</label>
+          <div class="label-s">Flip photos</div>
+<div class="seg" id="flips">
+  <button id="flipL" class="on">Left person</button>
+  <button id="flipR" class="on">Right person</button>
+</div>
+<div class="hint">Highlighted = mirrored. Tap one to flip that person so your hand-hearts meet.</div>
 
           <div class="actions">
             <button class="btn primary" id="downloadBtn">⬇ Download</button>
@@ -235,6 +240,7 @@
   let caption = "";
   let poseVal = 1500;
   let imgCache = null, photoVer = 0, baseCanvas = null, baseKey = "";
+  let flipL = true, flipR = true;   // true = mirrored (selfie style)
   let stickers = [], selectedId = null;
 
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -454,6 +460,7 @@
         conn.send({ type: "style", id: styleId });
         conn.send({ type: "pose", value: poseVal });
         conn.send({ type: "caption", text: caption });
+        conn.send({ type: "flips", l: flipL, r: flipR });
       }
     };
     if (c.open) ready(); else c.on("open", ready);
@@ -478,7 +485,10 @@
       setPose(msg.value, false);
     } else if (msg.type === "caption") {
       setCaption(msg.text || "", false);
-    } else if (msg.type === "sticker") {
+    }
+    else if (msg.type === "flips") {
+     setFlips(msg.l, msg.r, false);}
+    else if (msg.type === "sticker") {
       applyStickerOp(msg);
     }
   }
@@ -789,7 +799,6 @@
     const n = shots();
     const l = LAYOUTS[layoutId];
     const st = STYLES[styleId];
-    const mirror = $("mirror").checked;
     const { W, H } = layoutSize(l);
     cv.width = W; cv.height = H;
     const ctx = cv.getContext("2d");
@@ -807,8 +816,8 @@
         ctx.fillStyle = "#ffffff";
         ctx.fillRect(x - 10, y - 10, l.cellW + 20, l.cellH + 20);
       }
-      drawCover(ctx, leftImgs[i], x, y, half, l.cellH, mirror);
-      drawCover(ctx, rightImgs[i], x + half, y, half, l.cellH, mirror);
+      drawCover(ctx, leftImgs[i], x, y, half, l.cellH, flipL);
+      drawCover(ctx, rightImgs[i], x + half, y, half, l.cellH, flipR);
       ctx.fillStyle = dividerColor;
       ctx.fillRect(x + half - 2, y, 4, l.cellH);
     }
@@ -838,7 +847,7 @@
   }
 
   function ensureBase() {
-    const key = [layoutId, styleId, caption, $("mirror").checked, photoVer, isHost].join("|");
+    const key = [layoutId, styleId, caption, flipL, flipR, photoVer, isHost].join("|");
     if (baseCanvas && baseKey === key) return baseCanvas;
     baseCanvas = document.createElement("canvas");
     drawBase(baseCanvas);
@@ -898,7 +907,15 @@
     draw($("strip"), true);
   }
 
-  $("mirror").onchange = redraw;
+  function setFlips(l, r, fromMe) {
+  flipL = l; flipR = r;
+  $("flipL").classList.toggle("on", flipL);
+  $("flipR").classList.toggle("on", flipR);
+  if (fromMe && conn && conn.open) conn.send({ type: "flips", l, r });
+  redraw();
+}
+$("flipL").onclick = () => setFlips(!flipL, flipR, true);
+$("flipR").onclick = () => setFlips(flipL, !flipR, true);
 
   // ---------- stickers ----------
   const EMOJIS = ["❤️","💖","💕","🥰","😘","😍","😎","🤍","⭐","✨","🌸","🌷","🍒","🍓","🍋","🧸","🎀","🦋","☁️","🌙","🔥","🌈","✈️","🌏","💌","🎉"];
