@@ -66,14 +66,20 @@
   #copyHint { font-size:12px; color:var(--pink); font-weight:700; }
 
   .stage { position:relative; }
-  .videos { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-  .tile { position:relative; overflow:hidden; border-radius:20px; background:#1d1e26; box-shadow:0 10px 30px rgba(40,40,80,.12); }
-  video { display:block; width:100%; aspect-ratio:4/3; object-fit:cover; background:#1d1e26; }
+  .videos { display:grid; grid-template-columns:1fr 1fr; gap:12px; align-items:start; }
+  /* each tile takes the real shape of its camera stream (set from JS), so nothing is hidden by cropping */
+  .tile { position:relative; overflow:hidden; border-radius:20px; background:#1d1e26; aspect-ratio:4/3;
+          box-shadow:0 10px 30px rgba(40,40,80,.12); }
+  video { display:block; width:100%; height:100%; object-fit:cover; background:#1d1e26; }
   #localVideo { transform:scaleX(-1); }
+  /* framing guide: the dashed box is what ends up in the photo, the dimmed part is cropped out */
+  .guide { position:absolute; left:50%; top:50%; width:100%; height:100%; transform:translate(-50%,-50%);
+           border:2px dashed rgba(255,255,255,.9); border-radius:12px; box-shadow:0 0 0 999px rgba(0,0,0,.3);
+           pointer-events:none; }
   .tag { position:absolute; left:10px; bottom:10px; background:rgba(0,0,0,.45); color:#fff; border-radius:999px;
          padding:4px 11px; font-size:12px; font-weight:600; backdrop-filter:blur(6px); }
   .waiting { position:absolute; inset:0; display:grid; place-items:center; color:#c9cbd8; font-size:14px;
-             background:linear-gradient(135deg,#25263a,#1d1e26); }
+             background:linear-gradient(135deg,#25263a,#1d1e26); text-align:center; padding:10px; }
   #flash { position:absolute; inset:0; background:#fff; opacity:0; pointer-events:none; transition:opacity .35s; border-radius:20px; }
   #flash.on { opacity:.9; transition:none; }
   #count { position:absolute; inset:0; display:none; align-items:center; justify-content:center; font-size:120px; font-weight:800;
@@ -115,7 +121,7 @@
   .actions { display:flex; gap:10px; margin-top:20px; }
   .actions .btn { flex:1; }
 
-  @media (max-width:560px) { .videos { grid-template-columns:1fr; } #count { font-size:90px; } }
+  @media (max-width:560px) { #count { font-size:80px; } }
 </style>
 </head>
 <body>
@@ -146,9 +152,14 @@
 
     <div class="stage">
       <div class="videos">
-        <div class="tile"><video id="localVideo" autoplay muted playsinline></video><span class="tag">You</span></div>
+        <div class="tile">
+          <video id="localVideo" autoplay muted playsinline></video>
+          <div class="guide"></div>
+          <span class="tag">You</span>
+        </div>
         <div class="tile">
           <video id="remoteVideo" autoplay playsinline></video>
+          <div class="guide"></div>
           <span class="tag">Them</span>
           <div class="waiting" id="waiting">Waiting for them to join...</div>
         </div>
@@ -174,6 +185,7 @@
         <button data-v="1500" class="on">Normal</button>
         <button data-v="3000">Relaxed</button>
       </div>
+      <label class="check"><input type="checkbox" id="guideToggle" checked /> Show framing guide (the dashed box is what ends up in the photo)</label>
     </div>
 
     <section class="panel" id="results">
@@ -250,6 +262,35 @@
     };
   }
 
+  // ---------- live preview tiles: real camera shape + framing guide ----------
+  // The final photo is a center-crop of the camera image into half a layout cell.
+  // The guide shows exactly that crop, so what you see here is what ends up in the strip.
+  function updateGuide(video) {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const g = video.parentElement.querySelector(".guide");
+    if (!g || !vw || !vh) return;
+    const l = LAYOUTS[layoutId];
+    const ta = (l.cellW / 2) / l.cellH;      // target shape of one person's photo
+    const va = vw / vh;                      // shape of the camera image
+    g.style.width  = (va > ta ? (ta / va) * 100 : 100) + "%";
+    g.style.height = (va > ta ? 100 : (va / ta) * 100) + "%";
+  }
+  function fitTile(video) {
+    if (!video.videoWidth) return;
+    video.parentElement.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
+    updateGuide(video);
+  }
+  function updateGuides() { updateGuide($("localVideo")); updateGuide($("remoteVideo")); }
+
+  ["localVideo", "remoteVideo"].forEach((id) => {
+    const v = $(id);
+    v.addEventListener("loadedmetadata", () => fitTile(v));
+    v.addEventListener("resize", () => fitTile(v));   // e.g. a phone being rotated
+  });
+  $("guideToggle").onchange = () => {
+    document.querySelectorAll(".guide").forEach(g => g.style.display = $("guideToggle").checked ? "block" : "none");
+  };
+
   function renderLayoutChips() {
     const box = $("layouts");
     box.innerHTML = "";
@@ -281,6 +322,7 @@
   function setLayout(id, fromMe) {
     if (!LAYOUTS[id] || running) return;
     layoutId = id;
+    updateGuides();
     document.querySelectorAll("#layouts .chip").forEach(c => c.classList.toggle("active", c.dataset.id === id));
     if (fromMe && conn && conn.open) conn.send({ type: "layout", id });
     if ($("results").style.display === "block") {
